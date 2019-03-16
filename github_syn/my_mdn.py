@@ -19,7 +19,7 @@ def generate_data(n_train):
    x = np.empty([],dtype=float)
    for i in range(n_train):
        x= np.append(x,i*0.1)
-   y = 7 * np.sin(0.75 * x) + 0.5 * x
+   y = -7 * np.sin(0.75 * x) + 0.5 * x
    x_data = np.zeros([n_train], dtype=float)
    y_data = np.zeros([n_train], dtype=float)
    for i in range(1, n_train):
@@ -162,7 +162,7 @@ for epoch in range(num_epoch):
     loss.backward()
     opt.step()
     print("<>",epoch," ",loss.item())
-    if (epoch+1)%4:
+    if (epoch+1)%100==0:
         print("Test")
         pass
         # plt.cla()
