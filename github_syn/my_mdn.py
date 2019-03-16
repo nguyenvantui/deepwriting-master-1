@@ -183,3 +183,4 @@ for epoch in range(num_epoch):
         # testing the model
         # plt.show()
 print(">> helloworld <<")
+print("toi la quan")
