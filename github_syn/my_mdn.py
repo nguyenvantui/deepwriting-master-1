@@ -184,3 +184,4 @@ for epoch in range(num_epoch):
         # plt.show()
 print(">> helloworld <<")
 print("toi la quan")
+print("hehe toi la vu duc quan")
