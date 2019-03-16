@@ -182,6 +182,7 @@ for epoch in range(num_epoch):
             plt.plot(xx,yy,'bo')
         # testing the model
         # plt.show()
+
 print(">> helloworld <<")
 print("toi la quan")
 print("hehe toi la vu duc quan")
