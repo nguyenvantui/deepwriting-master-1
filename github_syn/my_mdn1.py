@@ -1,6 +1,37 @@
 import torch
 from torch.nn.modules import Module, LSTM
 import numpy as np
+import matplotlib.pyplot as plt
+import time
+
+n_train = 100
+device  = "cuda"
+
+def generate_data(n_train):
+   epsilon = np.random.normal(size=(n_train))
+   x = np.empty([],dtype=float)
+   for i in range(n_train):
+       x= np.append(x,i*0.1)
+   y = -7 * np.sin(0.75 * x) + 0.5 * x
+   x_data = np.zeros([n_train], dtype=float)
+   y_data = np.zeros([n_train], dtype=float)
+   for i in range(1, n_train):
+       x_data[i]=x[i]-x[i-1]
+       y_data[i]=y[i]-y[i-1]
+
+   return x_data, y_data
+
+
+x_data, y_data = generate_data(n_train)
+x_data = torch.from_numpy(x_data).to(device)
+y_data = torch.from_numpy(y_data).to(device)
+input = torch.zeros([1,n_train-1,3],dtype=torch.float).to(device)
+temp =x_data[:-1]
+input[0,:,0] = x_data[:-1]
+input[0,:,1] = y_data[:-1]
+output = torch.zeros([1,n_train-1,3],dtype=torch.float).to(device)
+output[0,:,0] = x_data[1:]
+output[0,:,1] = y_data[1:]
 
 class mdn(torch.nn.Module):
     """Gaussian mixture module as in Graves Section 4.1"""
@@ -115,17 +146,14 @@ class RNNCell(torch.nn.Module):
 
 
 class HandwritingModel(torch.nn.Module):
-    def __init__(self, n_hidden, n_chars, n_attention_components, n_gaussians, grad_clipping=10):
+    def __init__(self, n_hidden=3, n_gaussians=20, grad_clipping=10):
         super(HandwritingModel, self).__init__()
         self.n_hidden = n_hidden
-        self.n_chars = n_chars
-        self.n_attention_components = n_attention_components
         self.n_gaussians = n_gaussians
 
-        self.attention = Attention(n_hidden, n_attention_components)
         self.rnn_cell = RNNCell(3 + self.n_chars, n_hidden)
         self.grad_clipping = grad_clipping
-        self.mixture = MixtureGaussians2DandPen(n_hidden + self.n_chars, n_gaussians)
+        self.mixture = mdn(n_hidden + self.n_chars, n_gaussians)
 
     def rnn_step(self, inputs, h_state_pre, k_pre, w_pre, c, c_mask, mask=None, hidden_dict=None):
         # inputs: (batch_size, n_in + n_in_c)
@@ -240,3 +268,42 @@ class HandwritingModel(torch.nn.Module):
         seq_pt = torch.stack(seq_pt, 0)
         seq_mask = torch.stack(seq_mask, 0)
         return seq_pt, seq_mask
+
+print(">>> Training on: ",device)
+model = mdn(1,20).to(device)
+test_model = mdn(1,20).to("cpu")
+num_epoch = 10
+opt = torch.optim.RMSprop(model.parameters(), lr=1e-4, eps=1e-4, alpha=0.95, momentum=0.9, centered=True)
+
+for epoch in range(num_epoch):
+    # print()
+    model.to(device)
+    opt.zero_grad()
+    loss = model(input,output)
+    loss.backward()
+    opt.step()
+    print("<>",epoch," ",loss.item())
+    if (epoch+1)%100==0:
+        print("Test")
+        pass
+        # plt.cla()
+        model.to("cpu")
+        # test_model = test_model.load_state_dict(model.state_dict())
+        test_input = torch.zeros([1,3],dtype=torch.float).to("cpu")
+        # pass
+        test_input[0,0]=x_data[1]
+        test_input[0,1]=y_data[1]
+
+        xx=0
+        yy=0
+
+        for i in range(n_train):
+            s_output = model.predict(test_input,bias=10)
+            test_input = s_output
+            xx+=s_output[0,0].item()
+            yy+=s_output[0,1].item()
+            plt.plot(xx,yy,'bo')
+        # testing the model
+        # plt.show()
+
+print(">> helloworld <<")
