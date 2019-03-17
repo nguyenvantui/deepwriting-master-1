@@ -96,3 +96,147 @@ class mdn(torch.nn.Module):
         # loss as in Graves eq (26)
         loss = torch.sum(loss_per_timestep) / batch_size
         return loss
+
+class RNNCell(torch.nn.Module):
+    def __init__(self, input_size, hidden_size, bias=True):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.cell = torch.nn.LSTMCell(input_size, hidden_size, bias)
+    def forward(self, inp, hidden = None):
+        if hidden is None:
+            batch_size = inp.size(0)
+            hx = inp.new(batch_size, self.hidden_size).zero_()
+            cx = inp.new(batch_size, self.hidden_size).zero_()
+            hidden = (hx, cx)
+        return self.cell(inp, hidden)
+    def get_hidden(self, hidden):
+        return hidden[0]
+
+
+class HandwritingModel(torch.nn.Module):
+    def __init__(self, n_hidden, n_chars, n_attention_components, n_gaussians, grad_clipping=10):
+        super(HandwritingModel, self).__init__()
+        self.n_hidden = n_hidden
+        self.n_chars = n_chars
+        self.n_attention_components = n_attention_components
+        self.n_gaussians = n_gaussians
+
+        self.attention = Attention(n_hidden, n_attention_components)
+        self.rnn_cell = RNNCell(3 + self.n_chars, n_hidden)
+        self.grad_clipping = grad_clipping
+        self.mixture = MixtureGaussians2DandPen(n_hidden + self.n_chars, n_gaussians)
+
+    def rnn_step(self, inputs, h_state_pre, k_pre, w_pre, c, c_mask, mask=None, hidden_dict=None):
+        # inputs: (batch_size, n_in + n_in_c)
+        inputs = torch.cat([inputs, w_pre], dim=1)
+
+        # h: (batch_size, n_hidden)
+        h_state = self.rnn_cell(inputs, h_state_pre)
+        h = self.rnn_cell.get_hidden(h_state)
+        if h.requires_grad:
+            h.register_hook(lambda x: x.clamp(min=-self.grad_clipping, max=self.grad_clipping))
+
+        # update attention
+        phi, k = self.attention(h, k_pre, c.size(0))
+        phi = phi * c_mask
+        # w: (batch_size, n_chars)
+        w = torch.sum(phi.unsqueeze(-1) * c, dim=0)
+        if mask is not None:
+            k = mask.unsqueeze(1) * k + (1 - mask.unsqueeze(1)) * k_pre
+            w = mask.unsqueeze(1) * w + (1 - mask.unsqueeze(1)) * w_pre
+        if w.requires_grad:
+            w.register_hook(lambda x: x.clamp(min=-100, max=100))
+        return h_state, k, phi, w
+
+    def forward(self, seq_pt, seq_mask, seq_pt_target, c, c_mask,
+                h_ini=None, k_ini=None, w_ini=None, hidden_dict=None):
+        batch_size = seq_pt.size(1)
+        atensor = next(m.parameters())
+
+        # if h_ini is None:
+        #    h_ini = self.mixture.linear.weight.data.new(batch_size, self.n_hidden).zero_()
+        if k_ini is None:
+            k_ini = atensor.new(batch_size, self.n_attention_components).zero_()
+        if w_ini is None:
+            w_ini = atensor.new(batch_size, self.n_chars).zero_()
+
+        # Convert the integers representing chars into one-hot encodings
+        # seq_str will have shape (seq_length, batch_size, n_chars)
+
+        c_idx = c
+        c = c.data.new(c.size(0), c.size(1), self.n_chars).float().zero_()
+        c.scatter_(2, c_idx.view(c.size(0), c.size(1), 1), 1)
+
+        seq_h = []
+        seq_k = []
+        seq_w = []
+        seq_phi = []
+        h_state, k, w = h_ini, k_ini, w_ini
+        for inputs, mask in zip(seq_pt, seq_mask):
+            h_state, k, phi, w = self.rnn_step(inputs, h_state, k, w, c, c_mask, mask=mask, hidden_dict=hidden_dict)
+            h = self.rnn_cell.get_hidden(h_state)
+            seq_h.append(h)
+            seq_k.append(k)
+            seq_w.append(w)
+            if hidden_dict is not None:
+                seq_phi.append(phi)
+        seq_h = torch.stack(seq_h, 0)
+        seq_k = torch.stack(seq_k, 0)
+        seq_w = torch.stack(seq_w, 0)
+        if hidden_dict is not None:
+            hidden_dict['seq_h'].append(seq_h.data.cpu())
+            hidden_dict['seq_k'].append(seq_k.data.cpu())
+            hidden_dict['seq_w'].append(seq_w.data.cpu())
+            hidden_dict['seq_phi'].append(torch.stack(seq_phi, 0).data.cpu())
+        seq_hw = torch.cat([seq_h, seq_w], dim=-1)
+
+        loss = self.mixture(seq_hw, seq_mask, seq_pt_target, hidden_dict=hidden_dict)
+        return loss
+
+    def predict(self, pt_ini, seq_str, seq_str_mask,
+                h_ini=None, k_ini=None, w_ini=None, bias=.0, n_steps=10000, hidden_dict=None):
+        # pt_ini: (batch_size, 3), seq_str: (length_str_seq, batch_size), seq_str_mask: (length_str_seq, batch_size)
+        # h_ini: (batch_size, n_hidden), k_ini: (batch_size, n_mixture_attention), w_ini: (batch_size, n_chars)
+        # bias: float    The bias that controls the variance of the generation
+        # n_steps: int   The maximal number of generation steps.
+        atensor = next(m.parameters())
+        bias = bias * torch.ones((), device=atensor.get_device(), dtype=atensor.dtype)
+        batch_size = pt_ini.size(0)
+        if k_ini is None:
+            k_ini = atensor.new(batch_size, self.n_attention_components).zero_()
+        if w_ini is None:
+            w_ini = atensor.new(batch_size, self.n_chars).zero_()
+
+        # Convert the integers representing chars into one-hot encodings
+        # seq_str will have shape (seq_length, batch_size, n_chars)
+
+        input_seq_str = seq_str
+        seq_str = pt_ini.data.new(input_seq_str.size(0), input_seq_str.size(1), self.n_chars).float().zero_()
+        seq_str.scatter_(2, input_seq_str.data.view(seq_str.size(0), seq_str.size(1), 1), 1)
+        seq_str = torch.autograd.Variable(seq_str)
+
+        mask = torch.autograd.Variable(self.mixture.linear.weight.data.new(batch_size).fill_(1))
+        seq_pt = [pt_ini]
+        seq_mask = [mask]
+
+        last_char = seq_str_mask.long().sum(0) - 1
+
+        pt, h_state, k, w = pt_ini, h_ini, k_ini, w_ini
+        for i in range(n_steps):
+            h_state, k, phi, w = self.rnn_step(pt, h_state, k, w, seq_str, seq_str_mask, mask=mask,
+                                               hidden_dict=hidden_dict)
+            h = self.rnn_cell.get_hidden(h_state)
+            hw = torch.cat([h, w], dim=-1)
+            pt = self.mixture.predict(hw, bias)
+            seq_pt.append(pt)
+
+            last_phi = torch.gather(phi, 0, last_char.unsqueeze(0)).squeeze(0)
+            max_phi, _ = phi.max(0)
+            mask = mask * (1 - (last_phi >= 0.95 * max_phi).float())
+            seq_mask.append(mask)
+            if mask.data.sum() == 0:
+                break
+        seq_pt = torch.stack(seq_pt, 0)
+        seq_mask = torch.stack(seq_mask, 0)
+        return seq_pt, seq_mask
