@@ -5,33 +5,38 @@ import matplotlib.pyplot as plt
 import time
 
 n_train = 100
-device  = "cuda"
+device = "cuda"
+
+
+def pr(a):
+    print(a)
 
 def generate_data(n_train):
-   epsilon = np.random.normal(size=(n_train))
-   x = np.empty([],dtype=float)
-   for i in range(n_train):
-       x= np.append(x,i*0.1)
-   y = -7 * np.sin(0.75 * x) + 0.5 * x
-   x_data = np.zeros([n_train], dtype=float)
-   y_data = np.zeros([n_train], dtype=float)
-   for i in range(1, n_train):
-       x_data[i]=x[i]-x[i-1]
-       y_data[i]=y[i]-y[i-1]
+    epsilon = np.random.normal(size=(n_train))
+    x = np.empty([], dtype=float)
+    for i in range(n_train):
+        x = np.append(x, i * 0.1)
+    y = 7 * np.sin(0.75 * x) + 0.5 * x
+    x_data = np.zeros([n_train], dtype=float)
+    y_data = np.zeros([n_train], dtype=float)
+    for i in range(1, n_train):
+        x_data[i] = x[i] - x[i - 1]
+        y_data[i] = y[i] - y[i - 1]
 
-   return x_data, y_data
+    return x_data, y_data
 
 
 x_data, y_data = generate_data(n_train)
 x_data = torch.from_numpy(x_data).to(device)
 y_data = torch.from_numpy(y_data).to(device)
-input = torch.zeros([1,n_train-1,3],dtype=torch.float).to(device)
-temp =x_data[:-1]
-input[0,:,0] = x_data[:-1]
-input[0,:,1] = y_data[:-1]
-output = torch.zeros([1,n_train-1,3],dtype=torch.float).to(device)
-output[0,:,0] = x_data[1:]
-output[0,:,1] = y_data[1:]
+input = torch.zeros([1, n_train - 1, 3], dtype=torch.float).to(device)
+temp = x_data[:-1]
+input[0, :, 0] = x_data[:-1]
+input[0, :, 1] = y_data[:-1]
+output = torch.zeros([1, n_train - 1, 3], dtype=torch.float).to(device)
+output[0, :, 0] = x_data[1:]
+output[0, :, 1] = y_data[1:]
+
 
 class mdn(torch.nn.Module):
     """Gaussian mixture module as in Graves Section 4.1"""
@@ -114,7 +119,9 @@ class mdn(torch.nn.Module):
 
         tmp = 1 - rho ** 2
         # tmp is ln (pi N(x, mu, sigma, rho)) with N as in Graves eq (24) (this is later used for eq (26))
-        mixture_part_loglikelihood = (-z / (2 * tmp)- np.log(2 * np.pi) - torch.log(std_x) - torch.log(std_y) - 0.5 * torch.log(tmp) + torch.log(pi))
+        mixture_part_loglikelihood = (
+                    -z / (2 * tmp) - np.log(2 * np.pi) - torch.log(std_x) - torch.log(std_y) - 0.5 * torch.log(
+                tmp) + torch.log(pi))
 
         # logsumexp over the mixture components
         # mixture_log_likelihood the log in the first part of Graves eq (26)
@@ -122,188 +129,93 @@ class mdn(torch.nn.Module):
         mixture_log_likelihood = (mixture_part_loglikelihood - mpl_max).exp().sum(1).log() + mpl_max.squeeze(1)
 
         # these are the summands in Graves eq (26)
-        loss_per_timestep = ( -mixture_log_likelihood - tg_pen * torch.log(bernoulli) - (1 - tg_pen) * torch.log(1 - bernoulli))
+        loss_per_timestep = (
+                    -mixture_log_likelihood - tg_pen * torch.log(bernoulli) - (1 - tg_pen) * torch.log(1 - bernoulli))
 
         # loss as in Graves eq (26)
         loss = torch.sum(loss_per_timestep) / batch_size
         return loss
 
-class RNNCell(torch.nn.Module):
-    def __init__(self, input_size, hidden_size, bias=True):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.cell = torch.nn.LSTMCell(input_size, hidden_size, bias)
-    def forward(self, inp, hidden = None):
-        if hidden is None:
-            batch_size = inp.size(0)
-            hx = inp.new(batch_size, self.hidden_size).zero_()
-            cx = inp.new(batch_size, self.hidden_size).zero_()
-            hidden = (hx, cx)
-        return self.cell(inp, hidden)
-    def get_hidden(self, hidden):
-        return hidden[0]
 
+class HandwritingGenerator(Module):
+    def __init__(self, hidden_size, num_mixture_components):
+        super(HandwritingGenerator, self).__init__()
+        # First LSTM layer, takes as input a tuple (x, y, eol)
+        self.lstm1_layer = LSTM(input_size=3,
+                                hidden_size=hidden_size,
+                                batch_first=True)
+        # Gaussian Window layer
 
-class HandwritingModel(torch.nn.Module):
-    def __init__(self, n_hidden=3, n_gaussians=20, grad_clipping=10):
-        super(HandwritingModel, self).__init__()
-        self.n_hidden = n_hidden
-        self.n_gaussians = n_gaussians
+        self.mdn = mdn(n_inputs=hidden_size,
+                       n_mixture_components=num_mixture_components)
+        # Hidden State Variables
 
-        self.rnn_cell = RNNCell(3 + self.n_chars, n_hidden)
-        self.grad_clipping = grad_clipping
-        self.mixture = mdn(n_hidden + self.n_chars, n_gaussians)
+        self.hidden1 = None
 
-    def rnn_step(self, inputs, h_state_pre, k_pre, w_pre, c, c_mask, mask=None, hidden_dict=None):
-        # inputs: (batch_size, n_in + n_in_c)
-        inputs = torch.cat([inputs, w_pre], dim=1)
+        # Initiliaze parameters
+        self.reset_parameters()
 
-        # h: (batch_size, n_hidden)
-        h_state = self.rnn_cell(inputs, h_state_pre)
-        h = self.rnn_cell.get_hidden(h_state)
-        if h.requires_grad:
-            h.register_hook(lambda x: x.clamp(min=-self.grad_clipping, max=self.grad_clipping))
+    def forward(self, input_, output_, bias=None):
+        # First LSTM Layer
 
-        # update attention
-        phi, k = self.attention(h, k_pre, c.size(0))
-        phi = phi * c_mask
-        # w: (batch_size, n_chars)
-        w = torch.sum(phi.unsqueeze(-1) * c, dim=0)
-        if mask is not None:
-            k = mask.unsqueeze(1) * k + (1 - mask.unsqueeze(1)) * k_pre
-            w = mask.unsqueeze(1) * w + (1 - mask.unsqueeze(1)) * w_pre
-        if w.requires_grad:
-            w.register_hook(lambda x: x.clamp(min=-100, max=100))
-        return h_state, k, phi, w
+        output1, self.hidden1 = self.lstm1_layer(input_, self.hidden1)
 
-    def forward(self, seq_pt, seq_mask, seq_pt_target, c, c_mask,
-                h_ini=None, k_ini=None, w_ini=None, hidden_dict=None):
-        batch_size = seq_pt.size(1)
-        atensor = next(m.parameters())
-
-        # if h_ini is None:
-        #    h_ini = self.mixture.linear.weight.data.new(batch_size, self.n_hidden).zero_()
-        if k_ini is None:
-            k_ini = atensor.new(batch_size, self.n_attention_components).zero_()
-        if w_ini is None:
-            w_ini = atensor.new(batch_size, self.n_chars).zero_()
-
-        # Convert the integers representing chars into one-hot encodings
-        # seq_str will have shape (seq_length, batch_size, n_chars)
-
-        c_idx = c
-        c = c.data.new(c.size(0), c.size(1), self.n_chars).float().zero_()
-        c.scatter_(2, c_idx.view(c.size(0), c.size(1), 1), 1)
-
-        seq_h = []
-        seq_k = []
-        seq_w = []
-        seq_phi = []
-        h_state, k, w = h_ini, k_ini, w_ini
-        for inputs, mask in zip(seq_pt, seq_mask):
-            h_state, k, phi, w = self.rnn_step(inputs, h_state, k, w, c, c_mask, mask=mask, hidden_dict=hidden_dict)
-            h = self.rnn_cell.get_hidden(h_state)
-            seq_h.append(h)
-            seq_k.append(k)
-            seq_w.append(w)
-            if hidden_dict is not None:
-                seq_phi.append(phi)
-        seq_h = torch.stack(seq_h, 0)
-        seq_k = torch.stack(seq_k, 0)
-        seq_w = torch.stack(seq_w, 0)
-        if hidden_dict is not None:
-            hidden_dict['seq_h'].append(seq_h.data.cpu())
-            hidden_dict['seq_k'].append(seq_k.data.cpu())
-            hidden_dict['seq_w'].append(seq_w.data.cpu())
-            hidden_dict['seq_phi'].append(torch.stack(seq_phi, 0).data.cpu())
-        seq_hw = torch.cat([seq_h, seq_w], dim=-1)
-
-        loss = self.mixture(seq_hw, seq_mask, seq_pt_target, hidden_dict=hidden_dict)
+        loss = self.mdn(output1, output_)
+        # loss =
         return loss
 
-    def predict(self, pt_ini, seq_str, seq_str_mask,
-                h_ini=None, k_ini=None, w_ini=None, bias=.0, n_steps=10000, hidden_dict=None):
-        # pt_ini: (batch_size, 3), seq_str: (length_str_seq, batch_size), seq_str_mask: (length_str_seq, batch_size)
-        # h_ini: (batch_size, n_hidden), k_ini: (batch_size, n_mixture_attention), w_ini: (batch_size, n_chars)
-        # bias: float    The bias that controls the variance of the generation
-        # n_steps: int   The maximal number of generation steps.
-        atensor = next(m.parameters())
-        bias = bias * torch.ones((), device=atensor.get_device(), dtype=atensor.dtype)
-        batch_size = pt_ini.size(0)
-        if k_ini is None:
-            k_ini = atensor.new(batch_size, self.n_attention_components).zero_()
-        if w_ini is None:
-            w_ini = atensor.new(batch_size, self.n_chars).zero_()
+    def predict(self, input_, bias=None):
+        output1, self.hidden1 = self.lstm1_layer(input_, self.hidden1)
 
-        # Convert the integers representing chars into one-hot encodings
-        # seq_str will have shape (seq_length, batch_size, n_chars)
+        temp = output1.view(-1, output1.size(-1))
+        point = self.mdn.predict(temp)
+        # loss =
+        return point
 
-        input_seq_str = seq_str
-        seq_str = pt_ini.data.new(input_seq_str.size(0), input_seq_str.size(1), self.n_chars).float().zero_()
-        seq_str.scatter_(2, input_seq_str.data.view(seq_str.size(0), seq_str.size(1), 1), 1)
-        seq_str = torch.autograd.Variable(seq_str)
+    def reset_parameters(self):
+        self.hidden1 = None
 
-        mask = torch.autograd.Variable(self.mixture.linear.weight.data.new(batch_size).fill_(1))
-        seq_pt = [pt_ini]
-        seq_mask = [mask]
 
-        last_char = seq_str_mask.long().sum(0) - 1
-
-        pt, h_state, k, w = pt_ini, h_ini, k_ini, w_ini
-        for i in range(n_steps):
-            h_state, k, phi, w = self.rnn_step(pt, h_state, k, w, seq_str, seq_str_mask, mask=mask,
-                                               hidden_dict=hidden_dict)
-            h = self.rnn_cell.get_hidden(h_state)
-            hw = torch.cat([h, w], dim=-1)
-            pt = self.mixture.predict(hw, bias)
-            seq_pt.append(pt)
-
-            last_phi = torch.gather(phi, 0, last_char.unsqueeze(0)).squeeze(0)
-            max_phi, _ = phi.max(0)
-            mask = mask * (1 - (last_phi >= 0.95 * max_phi).float())
-            seq_mask.append(mask)
-            if mask.data.sum() == 0:
-                break
-        seq_pt = torch.stack(seq_pt, 0)
-        seq_mask = torch.stack(seq_mask, 0)
-        return seq_pt, seq_mask
-
-print(">>> Training on: ",device)
-model = mdn(1,20).to(device)
-test_model = mdn(1,20).to("cpu")
-num_epoch = 10
+print(">>> Training on: ", device)
+model = HandwritingGenerator(100, 20).to(device)
+num_epoch = 10000
 opt = torch.optim.RMSprop(model.parameters(), lr=1e-4, eps=1e-4, alpha=0.95, momentum=0.9, centered=True)
 
 for epoch in range(num_epoch):
     # print()
     model.to(device)
+    model.reset_parameters()
     opt.zero_grad()
-    loss = model(input,output)
+    loss = model(input, output)
     loss.backward()
     opt.step()
-    print("<>",epoch," ",loss.item())
-    if (epoch+1)%100==0:
+    # pr(loss)
+
+    # loss.backward()
+    # opt.step()
+    if (epoch + 1) % 50 == 0:
+        print("<>", epoch, " ", loss.item())
+    if (epoch + 1) % 100 == 0:
         print("Test")
         pass
         # plt.cla()
         model.to("cpu")
+        model.reset_parameters()
         # test_model = test_model.load_state_dict(model.state_dict())
-        test_input = torch.zeros([1,3],dtype=torch.float).to("cpu")
+        test_input = torch.zeros([1, 1, 3], dtype=torch.float).to("cpu")
         # pass
-        test_input[0,0]=x_data[1]
-        test_input[0,1]=y_data[1]
-
-        xx=0
-        yy=0
-
+        test_input[0, 0, 0] = x_data[1]
+        test_input[0, 0, 1] = y_data[1]
+        xx = 0
+        yy = 0
         for i in range(n_train):
-            s_output = model.predict(test_input,bias=10)
-            test_input = s_output
-            xx+=s_output[0,0].item()
-            yy+=s_output[0,1].item()
-            plt.plot(xx,yy,'bo')
-        # testing the model
-        # plt.show()
+            s_output = model.predict(test_input, bias=10)
+            test_input[0,0,0] = s_output[0, 0]
+            test_input[0,0,1] = s_output[0, 1]
+            xx += s_output[0, 0].item()
+            yy += s_output[0, 1].item()
+            plt.plot(xx, yy, 'bo')
+        #     testing the model
+        plt.show()
 
 print(">> helloworld <<")
