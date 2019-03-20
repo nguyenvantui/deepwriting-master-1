@@ -251,7 +251,6 @@ def vgg19(pretrained=True, **kwargs):
         model.load_state_dict(model_zoo.load_url(model_urls['vgg19']))
     return model
 
-
 def main(config):
     torch.manual_seed(config['seed'])
     print(">>> star loading data <<<")
@@ -265,7 +264,7 @@ def main(config):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # model_stroke = HandwritingGenerator(config['hidden_size'], config['num_mixture_components']).to(device)
-    model_stroke = HandwritingGenerator(400, 10).to(device)
+    model_stroke = HandwritingGenerator(400, 5).to(device)
     print("Checking device:",device)
 
     # print(training_dataset.alphabet)
@@ -276,6 +275,7 @@ def main(config):
     flag=False
     print(training_dataset.alphabet[36])
     if flag == False:
+        # model_vgg = vgg19(pretrained=True).eval()
         # model_vgg = vgg19(pretrained=True).eval()
         # model_vgg.to(device)
         # print(len(training_dataset.char_labels))
@@ -289,20 +289,26 @@ def main(config):
             print("Epoch {}:".format(epoch))
             count = 1
             total_loss = 0
+            # print(len(training_dataset.char_labels))
+            # time.sleep(1000000)
             for x in range(len(training_dataset.char_labels)):
-                read_data = training_dataset.char_labels[21]
-                all_stroke = training_dataset.undo_normalization(training_dataset.samples[21])
+                read_data = training_dataset.char_labels[x]
+                all_stroke = training_dataset.undo_normalization(training_dataset.samples[x])
                 # xxx = np.array([0.0, 0.0, 0.0],dtype=float)
                 stroke = []
                 # stroke.append(xxx)
-                for id in range(len(read_data)-1):
+                # for id in range(len(read_data)-1):
+                countt=-1
+                for char in training_dataset.char_labels[x]:
                     # if (read_data[id]<=63) and (11<=read_data[id]):
-                    if (read_data[id]==36):
+                    countt+=1
+                    # print(char)
+                    if (training_dataset.char_encoder.classes_[char]=="z"):
                         # print(x)
                         # print(all_stroke[id])
-                        char_ = training_dataset.alphabet[read_data[id]]
+                        # char_ = training_dataset.alphabet[read_data[id]]
                         # all_stroke[id].append(1.0);
-                        temp = all_stroke[id]
+                        temp = all_stroke[countt]
                         stroke.append(temp)
                     else:
                         if len(stroke)>4:
@@ -319,38 +325,48 @@ def main(config):
                             # # for i in range()
                             x_data = stroke[:,0]*100
                             y_data = stroke[:,1]*100
-                            # print()
-                            # xx = 0
-                            # yy = 0
-                            # draw_xx=[]
-                            # draw_yy=[]
-                            # plt.cla()
-                            # for i in range(n_train):
-                            #     xx += x_data[i]
-                            #     yy += y_data[i]
-                            #     draw_xx.append(xx)
-                            #     draw_yy.append(yy)
-                            # # testing the model
-                            # # plt.show()
-                            # plt.plot(draw_xx, draw_yy)
-                            # plt.gca().invert_yaxis()
-                            # plt.savefig(str(count) + ".jpg")
-                            # plt.close()
+                            p_data = stroke[:,2]
+                            xx = 0
+                            yy = 0
+                            draw_xx=[]
+                            draw_yy=[]
+                            plt.cla()
+                            for i in range(n_train):
+                                xx += x_data[i]
+                                yy += y_data[i]
+                                if int(p_data[i]) == 0:
+                                    draw_xx.append(xx)
+                                    draw_yy.append(yy)
+                                else:
+                                    plt.plot(draw_xx, draw_yy, 'b')
+                                    draw_xx = []
+                                    draw_yy = []
+                                # draw_xx.append(xx)
+                                # draw_yy.append(yy)
+                            # testing the model
+                            # plt.show()
+                            plt.plot(draw_xx, draw_yy)
+                            plt.gca().invert_yaxis()
+                            plt.savefig(str(count) + ".jpg")
+                            plt.close()
                             x_data = torch.from_numpy(x_data).to(device)
                             y_data = torch.from_numpy(y_data).to(device)
+                            p_data = torch.from_numpy(p_data).to(device)
                             input = torch.zeros([1, n_train - 1, 3], dtype=torch.float).to(device)
-                            temp = x_data[:-1]
+                            # temp = x_data[:-1]
                             input[0, :, 0] = x_data[:-1]
                             input[0, :, 1] = y_data[:-1]
+                            input[0, :, 2] = p_data[:-1]
                             output = torch.zeros([1, n_train - 1, 3], dtype=torch.float).to(device)
                             output[0, :, 0] = x_data[1:]
                             output[0, :, 1] = y_data[1:]
+                            output[0, :, 2] = p_data[1:]
                             optimizer.zero_grad()
                             loss = None
                             model_stroke.reset_parameters()
                             loss = model_stroke(input, output)
                             loss.backward()
-                            torch.nn.utils.clip_grad_norm(model_stroke.parameters(), 5)
+                            torch.nn.utils.clip_grad_norm(model_stroke.parameters(), 2)
                             optimizer.step()
                             total_loss+=loss.item()
                             if count%config['draw']==0:
@@ -358,42 +374,45 @@ def main(config):
                                 print("Epoch: {}, Percent:{:.2f}, Loss: {} ".format(epoch,(count/100)*100, total_loss/config['draw']))
                                 # total_loss=0
                                 # torch.save(model_stroke.state_dict(), 'model_stroke.pt')
-                            supercount += 1
-                            if (supercount + 1) % 500 == 0:
-                                print("Testing")
-                                plt.cla()
-                                model_stroke.eval()
-                                model_stroke.to("cpu")
-                                model_stroke.reset_parameters()
-                                # test_model = test_model.load_state_dict(model.state_dict())
-                                test_input = torch.zeros([1, 1, 3], dtype=torch.float).to("cpu")
-                                # pass
-                                test_input[0, 0, 0] = x_data[0]
-                                test_input[0, 0, 1] = y_data[0]
-                                xx = 0
-                                yy = 0
-                                plt.cla()
-                                draw_x = []
-                                draw_y = []
-                                for i in range(n_train - 5):
-                                    s_output = model_stroke.predict(test_input, bias=10)
-                                    test_input[0, 0, 0] = s_output[0, 0]
-                                    test_input[0, 0, 1] = s_output[0, 1]
-                                    xx += s_output[0, 0].item()
-                                    yy += s_output[0, 1].item()
-                                    draw_x.append(xx)
-                                    draw_y.append(yy)
-                                    # testing the model
-                                # plt.show()
-                                plt.plot(draw_x, draw_y)
-                                plt.gca().invert_yaxis()
-                                plt.savefig(str(epoch) + ".jpg")
-                                plt.close()
-                                model_stroke.to("cuda")
-                                model_stroke.train()
+                            # supercount += 1
+                            # if (supercount + 1) % 100 == 0:
+                            #     print("Testing")
+                            #     plt.cla()
+                            #     model_stroke.eval()
+                            #     model_stroke.to("cpu")
+                            #     model_stroke.reset_parameters()
+                            #     # test_model = test_model.load_state_dict(model.state_dict())
+                            #     test_input = torch.zeros([1, 1, 3], dtype=torch.float).to("cpu")
+                            #     # pass
+                            #     test_input[0, 0, 0] = x_data[0]
+                            #     test_input[0, 0, 1] = y_data[0]
+                            #     # print(x_data[0])
+                            #     # time.sleep(10000000)
+                            #     # bp()
+                            #     xx = 0
+                            #     yy = 0
+                            #     plt.cla()
+                            #     draw_x = []
+                            #     draw_y = []
+                            #     for i in range(n_train - 5):
+                            #         s_output = model_stroke.predict(test_input, bias=200)
+                            #         test_input[0, 0, 0] = s_output[0, 0]
+                            #         test_input[0, 0, 1] = s_output[0, 1]
+                            #         test_input[0, 0, 2] = s_output[0, 2]
+                            #         xx += s_output[0, 0].item()
+                            #         yy += s_output[0, 1].item()
+                            #         draw_x.append(xx)
+                            #         draw_y.append(yy)
+                            #         # testing the model
+                            #     # plt.show()
+                            #     plt.plot(draw_x, draw_y)
+                            #     plt.plot(draw_x[n_train - 6],draw_y[n_train - 6],'ro')
+                            #     plt.gca().invert_yaxis()
+                            #     plt.savefig(str(epoch) + ".jpg")
+                            #     plt.close()
+                            #     model_stroke.to("cuda")
+                            #     model_stroke.train()
                         stroke = []
-
-
                         # xxx = np.array([0.0, 0.0, 0.0], dtype=float)
                         # stroke.append(xxx)
     # else:
